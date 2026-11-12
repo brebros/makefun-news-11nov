@@ -1,68 +1,61 @@
 #!/usr/bin/env python3
-"""makefun entrypoint: copy summary.txt -> <outdir>/entry.txt verbatim.
+"""make.fun entrypoint — copy summary.txt to <MAKEFUN_OUTPUT_DIR>/entry.txt.
 
-Design notes:
-- Pure stdlib, no side effects beyond the output file.
-- All I/O in binary mode so the output is byte-identical to the source
-  regardless of platform or locale (no newline translation).
-- Paths resolved relative to this script, not the cwd, so it works
-  from any invocation directory.
-- Output dir: env MAKEFUN_OUTPUT_DIR if set (env var wins even when
-  empty falls back via `or`), else /output; created recursively.
-- Exit codes: 0 success, 1 on missing/empty source or I/O failure
-  (message goes to stderr, status line to stdout).
-- Idempotent/deterministic: the same source always yields the same
-  bytes; running twice overwrites with identical content.
+My design:
+- stdlib only, single file, one env var (MAKEFUN_OUTPUT_DIR, default /output).
+- binary-mode copy => byte-identical output, no newline mangling.
+- deterministic: same source bytes in, same output bytes out, every run.
+- source validated up front; distinct exit codes per failure type:
+    0 = ok, 2 = source missing, 3 = source empty, 4 = write failed.
+- post-write verification: output is read back and compared to the
+  source before success is reported.
+- prints one short status line on success.
 """
 
 import os
 import sys
 
-EXIT_OK = 0
-EXIT_ERROR = 1
-DEFAULT_OUT_DIR = "/output"
+SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summary.txt")
+OUT_NAME = "entry.txt"
+
+EXIT_OK, EXIT_NO_SOURCE, EXIT_EMPTY_SOURCE, EXIT_WRITE = 0, 2, 3, 4
+
 
 def main() -> int:
-    base = os.path.dirname(os.path.abspath(__file__))
-    src_path = os.path.join(base, "summary.txt")
-
-    # Preflight: source must exist and be a regular file.
-    if not os.path.isfile(src_path):
-        sys.stderr.write(
-            "ERROR: source file not found: %s\n" % src_path
-        )
-        return EXIT_ERROR
-
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or DEFAULT_OUT_DIR
-    out_path = os.path.join(out_dir, "entry.txt")
+    if not os.path.isfile(SOURCE):
+        print(f"ERROR: source not found: {SOURCE}", file=sys.stderr)
+        return EXIT_NO_SOURCE
 
     try:
-        with open(src_path, "rb") as f:
-            payload = f.read()
+        with open(SOURCE, "rb") as f:
+            data = f.read()
     except OSError as exc:
-        sys.stderr.write("ERROR: cannot read %s: %s\n" % (src_path, exc))
-        return EXIT_ERROR
+        print(f"ERROR: cannot read {SOURCE}: {exc}", file=sys.stderr)
+        return EXIT_NO_SOURCE
 
-    # Validate: refuse to produce an empty artifact.
-    if not payload:
-        sys.stderr.write("ERROR: source is empty: %s\n" % src_path)
-        return EXIT_ERROR
+    if not data:
+        print("ERROR: source is empty", file=sys.stderr)
+        return EXIT_EMPTY_SOURCE
 
-
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    out_path = os.path.join(out_dir, OUT_NAME)
     try:
         os.makedirs(out_dir, exist_ok=True)
         with open(out_path, "wb") as f:
-            f.write(payload)
-        # Normalize permissions so output mode is deterministic.
-        os.chmod(out_path, 0o644)
+            f.write(data)
+        # Integrity check: re-read and verify byte count matches source.
+        with open(out_path, "rb") as f:
+            written = f.read()
+        if written != data:
+            print("ERROR: output bytes differ from source", file=sys.stderr)
+            return EXIT_WRITE
     except OSError as exc:
-        sys.stderr.write(
-            "ERROR: cannot write %s: %s\n" % (out_path, exc)
-        )
-        return EXIT_ERROR
+        print(f"ERROR: cannot write {out_path}: {exc}", file=sys.stderr)
+        return EXIT_WRITE
 
-    print("OK: wrote %d bytes to %s" % (len(payload), out_path))
+    print(f"OK: wrote {len(data)} chars ({len(data)} bytes) -> {out_path}")
     return EXIT_OK
+
 
 if __name__ == "__main__":
     sys.exit(main())
